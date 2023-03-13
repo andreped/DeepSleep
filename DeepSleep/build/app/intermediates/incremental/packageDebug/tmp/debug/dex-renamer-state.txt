@@ -1,0 +1,4 @@
+#Mon Mar 13 21:37:44 CET 2023
+base.0=C\:\\Users\\andrp\\workspace\\DeepSleep\\build\\app\\intermediates\\dex\\debug\\mergeDexDebug\\classes.dex
+renamed.0=classes.dex
+path.0=classes.dex
