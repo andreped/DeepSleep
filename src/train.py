@@ -7,9 +7,100 @@ import numpy as np
 from .losses import categorical_focal_loss
 from datetime import datetime, date
 import pandas as pd
-import mne
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+import mne
 from mne.datasets.sleep_physionet.age import fetch_data
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import FunctionTransformer
+
+
+# set mne verbosity
+mne.set_log_level(False)
+
+# global vars
+annotation_desc_2_event_id = {
+            'Sleep stage W': 1,
+            'Sleep stage 1': 2,
+            'Sleep stage 2': 3,
+            'Sleep stage 3': 4,
+            'Sleep stage 4': 4,
+            'Sleep stage R': 5
+        }
+
+# create a new event_id that unifies stages 3 and 4
+event_id = {
+    'Sleep stage W': 1,
+    'Sleep stage 1': 2,
+    'Sleep stage 2': 3,
+    'Sleep stage 3/4': 4,
+    'Sleep stage R': 5
+}
+
+
+def get_epochs_from_raw(raw, annot):
+    raw_train = mne.io.read_raw_edf(raw, stim_channel='Event marker', infer_types=True)
+    annot_train = mne.read_annotations(annot)
+    raw_train.set_annotations(annot_train, emit_warning=False)
+
+    # keep last 30-min wake events before sleep and first 30-min wake events after
+    # sleep and redefine annotations on raw data
+    annot_train.crop(annot_train[1]['onset'] - 30 * 60,
+                     annot_train[-2]['onset'] + 30 * 60)
+    raw_train.set_annotations(annot_train, emit_warning=False)
+
+    events_train, _ = mne.events_from_annotations(
+        raw_train, event_id=annotation_desc_2_event_id, chunk_duration=30.)
+
+    tmax = 30. - 1. / raw_train.info['sfreq']  # tmax in included
+
+    epochs_train = mne.Epochs(raw=raw_train, events=events_train,
+                                event_id=event_id, tmin=0., tmax=tmax, baseline=None)
+    
+    return epochs_train
+
+
+def eeg_power_band(epochs):
+    """EEG relative power band feature extraction.
+
+    This function takes an ``mne.Epochs`` object and creates EEG features based
+    on relative power in specific frequency bands that are compatible with
+    scikit-learn.
+
+    Parameters
+    ----------
+    epochs : Epochs
+        The data.
+
+    Returns
+    -------
+    X : numpy array of shape [n_samples, 5]
+        Transformed data.
+    """
+    # specific frequency bands
+    FREQ_BANDS = {"delta": [0.5, 4.5],
+                  "theta": [4.5, 8.5],
+                  "alpha": [8.5, 11.5],
+                  "sigma": [11.5, 15.5],
+                  "beta": [15.5, 30]}
+
+    spectrum = epochs.compute_psd(picks='eeg', fmin=0.5, fmax=30.)
+    psds, freqs = spectrum.get_data(return_freqs=True)
+    # Normalize the PSDs
+    psds /= np.sum(psds, axis=-1, keepdims=True)
+
+    X = []
+    for fmin, fmax in FREQ_BANDS.values():
+        psds_band = psds[:, :, (freqs >= fmin) & (freqs < fmax)].mean(axis=-1)
+        X.append(psds_band.reshape(len(psds), -1))
+
+    return np.concatenate(X, axis=1)
 
 
 class Trainer:
@@ -20,186 +111,66 @@ class Trainer:
         self.history_path = "output/history/"
         self.model_path = "output/models/"
         self.dataset_path = "output/datasets/" + self.name + "/"
-        self.nb_classes = 20
-        self.maxlen = 50
-        self.feature_names = ['accel_x', 'accel_y', 'accel_z']
-
-    def setup_dataset(self, dataset):
-        dataset = dataset.map(lambda x, y: ({elem: tf.expand_dims(x[elem], axis=-1) for elem in x},
-                                            tf.one_hot(y, depth=self.nb_classes, axis=0)))
-        return dataset.map(lambda x, y: (self.merge(x), y))
-
-    def merge(self, x):
-        out = []
-        for key_ in self.feature_names:
-            tmp = x[key_]
-            out.append(tmp)
-        out = tf.concat(out, axis=1)
-        return out
-
-    def pad(self, dataset, value=0):
-        return dataset.map(lambda x, y: (tf.pad(x, [[0, self.maxlen - tf.shape(x)[0]], [0, 0]],
-                                                mode='CONSTANT', constant_values=value),
-                                         y))
-
-    def save_datasets(self, x, name):
-        tf.data.Dataset.save(x, self.dataset_path + name + "/")
-
-    def get_datetime(self):
-        curr_date = "".join(date.today().strftime("%d/%m").split("/")) + date.today().strftime("%Y")[2:]
-        curr_time = "".join(str(datetime.now()).split(" ")[1].split(".")[0].split(":"))
-        return curr_date, curr_time
-
-    def get_mu_and_var(self, dataset):
-        tmp = []
-        for x, y in dataset:
-            x = np.array(x)
-            tmp.extend(x)
-        return np.mean(tmp, axis=0), np.var(tmp, axis=0)
-    
-    def load_edf(self, file_):
-        data = mne.io.read_raw_edf(file_)
-
-        # @TODO: Temporary hack to just get it working - need to find generic solution for this
-        gt_file = file_.replace("0-PSG", "C-Hypnogram")
-
-        print(file_)
-        print(gt_file)
-
-        annot_data = mne.read_annotations(gt_file)
-        data.set_annotations(annot_data, emit_warning=True)
-
-        raw_data = data.get_data()
-        print(raw_data.shape)
-        print(raw_data)
-        
-        
-
-
-        return raw_data
 
     def fit(self):
-        # get supervised data
-        data_path = "./data/sleep-edf-database-expanded-1.0.0/"
-        files = pd.read_csv(data_path + "RECORDS", delimiter="\t")
-        files = np.squeeze(np.asarray(files), axis=-1)
-        files = np.asarray([data_path + elem for elem in files])
-        print(files.shape)
-        print(files)
+        subjects = list(range(83))  # 0-82
+        missing = [39, 68, 69, 78, 79, 36, 52]
+        for m in missing:
+            subjects.remove(m)
 
-        #self.load_edf(files[0])
+        all_files = fetch_data(subjects=subjects, recording=[1])
 
-        ALICE, BOB = 0, 1
+        print("number of subjects:", len(all_files))
 
-        [alice_files, bob_files] = fetch_data(subjects=[ALICE, BOB], recording=[1])
+        train_files = all_files[:60]  # [:60]
+        test_files = all_files[60:]  # [60:]
+        
+        # Fpz-Cz (EEG) is the variable of interest
 
-        raw_train = mne.io.read_raw_edf(alice_files[0], stim_channel='Event marker',
-                                        infer_types=True)
-        annot_train = mne.read_annotations(alice_files[1])
+        # need to preprocess the training set by looping over all subjects
+        train_epoch_list = []
+        for raw, annot in tqdm(train_files, "train"):
+            try:
+                epochs_train = get_epochs_from_raw(raw, annot)
+                train_epoch_list.append(epochs_train)
+            except ValueError as e:
+                print(e)
 
-        raw_train.set_annotations(annot_train, emit_warning=False)
+        train_data = mne.concatenate_epochs(train_epoch_list)
 
-        raw_data = raw_train.get_data()
-        print(raw_data.shape)
-        print(raw_data)
+        # prepare test set
+        test_epoch_list = []
+        for raw, annot in tqdm(test_files, "test"):
+            try:
+                epoch_test = get_epochs_from_raw(raw, annot)
+                test_epoch_list.append(epoch_test)
+            except ValueError as e:
+                print(e)
+        
+        test_data = mne.concatenate_epochs(test_epoch_list)
 
-        """
-        # plot some data
-        # scalings were chosen manually to allow for simultaneous visualization of
-        # different channel types in this specific dataset
-        raw_train.plot(start=60, duration=60,
-                    scalings=dict(eeg=1e-4, resp=1e3, eog=1e-4, emg=1e-7,
-                                    misc=1e-1))
-        plt.show()
-        """
-
-        # Fpz-Dz (EEG) is the variable of interest
-
-
-        exit()
-
-        train, test, val = tfds.load('smartwatch_gestures', split=['train[:80%]', 'train[80%:90%]', 'train[90%:]'],
-                                     as_supervised=True, shuffle_files=True)
-
-        N_train = len(list(train))
-        N_val = len(list(val))
-
-        # preprocess data
-        train = self.setup_dataset(train)
-        val = self.setup_dataset(val)
-        test = self.setup_dataset(test)
-
-        # get mu and std from train set, for each feature
-        mu, var = self.get_mu_and_var(train)
-
-        # pad all sequences to fixed maxlen
-        train = self.pad(train)
-        val = self.pad(val)
-        test = self.pad(test)
-
-        # save datasets on disk  @TODO: This takes extremely long!
-        #self.save_datasets(train, "train")
-        #self.save_datasets(val, "val")
-        #self.save_datasets(test, "test")
-
-        train = train.shuffle(buffer_size=4).batch(self.ret.batch_size).prefetch(1).repeat(-1)
-        val = val.shuffle(buffer_size=4).batch(self.ret.batch_size).prefetch(1).repeat(-1)
-
-        # define architecture
-        model = get_model(self.ret, mu=mu, var=var)
-
-        # tensorboard history logger
-        tb_logger = TensorBoard(log_dir="output/logs/" + self.name + "/", histogram_freq=1, update_freq="batch")
-
-        # early stopping
-        early = EarlyStopping(patience=self.ret.patience, verbose=1)
-
-        # setup history logger
-        history = CSVLogger(
-            self.history_path + "history_" + self.name + ".csv",
-            append=True
+        ## train multiclass model
+        pipe = make_pipeline(
+            FunctionTransformer(eeg_power_band, validate=False),
+            RandomForestClassifier(n_estimators=100, random_state=42)
         )
 
-        # model checkpoint to save best model only
-        save_best = ModelCheckpoint(
-            self.model_path + "model_" + self.name + ".h5",
-            monitor="val_loss",
-            verbose=2,
-            save_best_only=True,
-            save_weights_only=False,
-            mode="auto",
-            save_freq="epoch"
-        )
+        # Train
+        y_train = train_data.events[:, 2]
 
-        # define loss
-        if self.ret.loss == "cce":
-            loss_ = "categorical_crossentropy"
-        elif self.ret.loss == "focal":
-            loss_ = categorical_focal_loss()
-        else:
-            raise ValueError("Unknown loss function specified. Supported losses are: {'cce', 'focal'}.")
+        pipe.fit(train_data, y_train)
 
-        # compile model (define optimizer, losses, metrics)
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=self.ret.learning_rate),
-            loss=loss_,
-            metrics=["acc"],  # , tfa.metrics.F1Score(num_classes=self.nb_classes, average="macro")],
-        )
+        # Test
+        y_pred = pipe.predict(test_data)
 
-        # train model
-        model.fit(
-            train,
-            steps_per_epoch=N_train // self.ret.batch_size,
-            epochs=self.ret.epochs,
-            validation_data=val,
-            validation_steps=N_val // self.ret.batch_size,
-            callbacks=[save_best, history, early, tb_logger],
-            verbose=1,
-        )
+        # Assess the results
+        y_test = test_data.events[:, 2]
+        acc = accuracy_score(y_test, y_pred)
 
-    def predict(self, x):
-        pass
+        print("Accuracy score: {}".format(acc))
 
-    def eval(self, model_name):
-        dataset = tf.data.Dataset.load(self.dataset_path + "test/")
-        print(dataset)
+        # confusion matrix
+        print(confusion_matrix(y_test, y_pred))
+
+        # report
+        print(classification_report(y_test, y_pred, target_names=event_id.keys()))
