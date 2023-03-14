@@ -1,5 +1,27 @@
 # DeepSleep
 
+## Setup
+
+When using this framework, it is a good idea to setup a virtual environment:
+```
+virtualenv -ppython3 venv --clear
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Tested with Python 3.7.9, on Win10, macOS, and Ubuntu Linux operating systems.
+
+Note that to activate the virtual environment on Windows instead run `./venv/Scripts/activate`.
+
+## Usage
+
+To train a model, simply run:
+```
+python main.py
+```
+
+The script supports multiple arguments. To see supported arguments, run `python main.py -h`.
+
 
 ## Acknowledgements
 
