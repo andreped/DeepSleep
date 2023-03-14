@@ -31,7 +31,7 @@ def main():
     os.makedirs("output/datasets/", exist_ok=True)
 
     if args.task == "train":
-        from dss.train import Trainer
+        from src.train import Trainer
         Trainer(args).fit()
     elif args.task == "deploy":
         from src.eval import Evaluator
