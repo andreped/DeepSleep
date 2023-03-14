@@ -6,6 +6,10 @@ from .models import get_model
 import numpy as np
 from .losses import categorical_focal_loss
 from datetime import datetime, date
+import pandas as pd
+import mne
+import matplotlib.pyplot as plt
+from mne.datasets.sleep_physionet.age import fetch_data
 
 
 class Trainer:
@@ -52,9 +56,68 @@ class Trainer:
             x = np.array(x)
             tmp.extend(x)
         return np.mean(tmp, axis=0), np.var(tmp, axis=0)
+    
+    def load_edf(self, file_):
+        data = mne.io.read_raw_edf(file_)
+
+        # @TODO: Temporary hack to just get it working - need to find generic solution for this
+        gt_file = file_.replace("0-PSG", "C-Hypnogram")
+
+        print(file_)
+        print(gt_file)
+
+        annot_data = mne.read_annotations(gt_file)
+        data.set_annotations(annot_data, emit_warning=True)
+
+        raw_data = data.get_data()
+        print(raw_data.shape)
+        print(raw_data)
+        
+        
+
+
+        return raw_data
 
     def fit(self):
         # get supervised data
+        data_path = "./data/sleep-edf-database-expanded-1.0.0/"
+        files = pd.read_csv(data_path + "RECORDS", delimiter="\t")
+        files = np.squeeze(np.asarray(files), axis=-1)
+        files = np.asarray([data_path + elem for elem in files])
+        print(files.shape)
+        print(files)
+
+        #self.load_edf(files[0])
+
+        ALICE, BOB = 0, 1
+
+        [alice_files, bob_files] = fetch_data(subjects=[ALICE, BOB], recording=[1])
+
+        raw_train = mne.io.read_raw_edf(alice_files[0], stim_channel='Event marker',
+                                        infer_types=True)
+        annot_train = mne.read_annotations(alice_files[1])
+
+        raw_train.set_annotations(annot_train, emit_warning=False)
+
+        raw_data = raw_train.get_data()
+        print(raw_data.shape)
+        print(raw_data)
+
+        """
+        # plot some data
+        # scalings were chosen manually to allow for simultaneous visualization of
+        # different channel types in this specific dataset
+        raw_train.plot(start=60, duration=60,
+                    scalings=dict(eeg=1e-4, resp=1e3, eog=1e-4, emg=1e-7,
+                                    misc=1e-1))
+        plt.show()
+        """
+
+        # Fpz-Dz (EEG) is the variable of interest
+
+
+        exit()
+
         train, test, val = tfds.load('smartwatch_gestures', split=['train[:80%]', 'train[80%:90%]', 'train[90%:]'],
                                      as_supervised=True, shuffle_files=True)
 
