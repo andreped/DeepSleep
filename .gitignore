@@ -26,5 +26,6 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
-# ignore data/ directory
+# ignore training-related data/ and output/ directories
 data/
+output/
