@@ -29,3 +29,6 @@ app.*.map.json
 # ignore training-related data/ and output/ directories
 data/
 output/
+
+# cache
+*.pyc
