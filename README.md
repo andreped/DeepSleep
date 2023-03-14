@@ -4,7 +4,7 @@ In this project, we attempt to train a sleep stage classification from polysomno
 data and integrate it into a mobile app for real-time deployment.
 
 The goal is to stream data from a smart watch and use the pulse data as surrogate for the
-Fpz-Dz (EEG) signal.
+Fpz-Cz (EEG) signal.
 
 ## Setup
 
